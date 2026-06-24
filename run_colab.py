@@ -134,7 +134,7 @@ def main():
     print(f"  Batch size: {args.batch_size}, Seq len: {args.seq_len}")
     print(f"  Effective batch: {args.batch_size * grad_accum} seq/step")
 
-    log_interval = max(1, (len(train_loader) // grad_accum) // 10)
+    log_interval = 1  # Affiche chaque step
     val_interval = max(1, len(train_loader) // grad_accum)
     t0 = time.time()
     trainer.train(
