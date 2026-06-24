@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .config import ModelConfig
 from .transformer import DecoderLayer
@@ -86,31 +87,91 @@ class SuperCodeurModel(nn.Module):
         cos = self.cos[past_len : past_len + seq_len]
         sin = self.sin[past_len : past_len + seq_len]
 
+        use_ckpt = (
+            self.config.gradient_checkpointing
+            and self.training
+            and not use_cache
+        )
+
         new_kv: List[Tuple[torch.Tensor, torch.Tensor]] = []
         for i, layer in enumerate(self.layers):
             layer_past = past_kv[i] if past_kv is not None else None
-            h, present = layer(
-                h, cos, sin, mask=None, past_kv=layer_past, use_cache=use_cache
-            )
+            if use_ckpt:
+                # Recompute this layer's activations in the backward pass
+                # instead of holding them in memory through the whole forward.
+                h = checkpoint(
+                    self._layer_forward, layer, h, cos, sin,
+                    use_reentrant=False,
+                )
+                present = None
+            else:
+                h, present = layer(
+                    h, cos, sin, mask=None,
+                    past_kv=layer_past, use_cache=use_cache,
+                )
             if use_cache:
                 new_kv.append(present)
 
         h = self.norm(h)
 
         if targets is not None:
-            logits = self.lm_head(h)
-            # Next-token objective: predict token t+1 from positions <= t.
-            shift_logits = logits[:, :-1, :].contiguous()
-            shift_targets = targets[:, 1:].contiguous()
-            loss = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_targets.view(-1),
-                ignore_index=ignore_index,
-            )
-            return logits, loss
+            # Next-token objective: predict token t+1 from the state at t.
+            # Computed in row-chunks so the full [B*T, vocab] logit tensor
+            # (>1 GB at vocab=32k) is never materialized at once. No logits
+            # are returned during training (the trainer only needs the loss).
+            hidden = h[:, :-1, :].reshape(-1, h.size(-1))
+            labels = targets[:, 1:].reshape(-1)
+            loss = self._chunked_loss(hidden, labels, ignore_index)
+            return None, loss
 
         logits = self.lm_head(h)
         return logits, (new_kv if use_cache else None)
+
+    @staticmethod
+    def _layer_forward(layer, h, cos, sin):
+        # Checkpoint-friendly wrapper: tensor in, tensor out (training has no
+        # KV-cache, so the present_kv output is always None and dropped here).
+        out, _ = layer(h, cos, sin, mask=None, past_kv=None, use_cache=False)
+        return out
+
+    def _chunked_loss(
+        self,
+        hidden: torch.Tensor,
+        labels: torch.Tensor,
+        ignore_index: int,
+        chunk_size: int = 1024,
+    ) -> torch.Tensor:
+        """Memory-bounded cross-entropy over the tied LM head.
+
+        Projects and scores ``chunk_size`` rows at a time. Each chunk's logits
+        are recomputed in the backward pass (checkpointing), so peak logit
+        memory is ``chunk_size * vocab`` rather than ``B*T * vocab``.
+        """
+        weight = self.lm_head.weight
+
+        def score(h_chunk: torch.Tensor, lbl_chunk: torch.Tensor) -> torch.Tensor:
+            logits = F.linear(h_chunk, weight)
+            return F.cross_entropy(
+                logits.float(),
+                lbl_chunk,
+                ignore_index=ignore_index,
+                reduction="sum",
+            )
+
+        total = hidden.new_zeros(())
+        recompute = self.training and torch.is_grad_enabled()
+        for start in range(0, hidden.size(0), chunk_size):
+            h_chunk = hidden[start : start + chunk_size]
+            lbl_chunk = labels[start : start + chunk_size]
+            if recompute:
+                total = total + checkpoint(
+                    score, h_chunk, lbl_chunk, use_reentrant=False
+                )
+            else:
+                total = total + score(h_chunk, lbl_chunk)
+
+        valid = (labels != ignore_index).sum().clamp(min=1)
+        return total / valid
 
     @torch.no_grad()
     def generate(

@@ -29,8 +29,10 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="100M", choices=["nano", "10M", "50M", "100M", "300M", "350M"])
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--seq_len", type=int, default=512)
+    parser.add_argument("--no_grad_ckpt", action="store_true", help="Disable gradient checkpointing (faster, more VRAM)")
+    parser.add_argument("--compile", action="store_true", help="Enable torch.compile (A100/H100 only, not T4)")
     parser.add_argument("--max_files", type=int, default=50000)
     parser.add_argument("--data_dir", type=str, default="./data/raw_big")
     parser.add_argument("--output_dir", type=str, default="./checkpoints")
@@ -73,12 +75,17 @@ def main():
     # ── Model ─────────────────────────────────────────────────────────────
     config = ModelConfig.from_preset(args.config, vocab_size=vocab_size)
     config.max_seq_len = args.seq_len
+    # Gradient checkpointing on by default on GPU: keeps activation memory low
+    # enough to fit 300M+ on a 16 GB T4. Disable with --no_grad_ckpt.
+    config.gradient_checkpointing = (device == "cuda") and not args.no_grad_ckpt
     print(f"\n=== Model config: {args.config} ===")
     print(config)
     print(f"Expected params: {config.total_params_estimated:,}")
 
     model = SuperCodeurModel(config).to(device)
-    if device == "cuda":
+    # torch.compile is OFF by default: on a T4 it gives no speedup (no native
+    # bf16) and eats ~2 GB. Enable only on A100/H100 with --compile.
+    if args.compile and device == "cuda":
         model = torch.compile(model)
         print("torch.compile enabled")
     print(f"Actual params: {model.count_params():,}")

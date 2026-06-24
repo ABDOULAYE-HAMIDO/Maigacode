@@ -16,6 +16,10 @@ class ModelConfig:
     rope_theta: float = 10000.0
     dropout: float = 0.0
     tie_embeddings: bool = True
+    # Recompute layer activations during backward instead of storing them.
+    # Trades ~30% extra compute for a large drop in activation memory —
+    # essential for fitting 300M+ on a 16 GB T4.
+    gradient_checkpointing: bool = False
 
     @classmethod
     def from_preset(cls, name: str, vocab_size: int = 32000) -> "ModelConfig":
