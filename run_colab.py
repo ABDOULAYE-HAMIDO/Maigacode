@@ -134,13 +134,15 @@ def main():
     print(f"  Batch size: {args.batch_size}, Seq len: {args.seq_len}")
     print(f"  Effective batch: {args.batch_size * grad_accum} seq/step")
 
+    log_interval = max(1, (len(train_loader) // grad_accum) // 10)
+    val_interval = max(1, len(train_loader) // grad_accum)
     t0 = time.time()
     trainer.train(
         train_loader=train_loader,
         val_loader=val_loader,
         num_epochs=args.epochs,
-        log_interval=max(1, len(train_loader) // 10),
-        val_interval=max(1, len(train_loader)),
+        log_interval=log_interval,
+        val_interval=val_interval,
         save_dir=str(output_dir),
     )
     print(f"\nTraining time: {(time.time() - t0) / 60:.1f} minutes")
