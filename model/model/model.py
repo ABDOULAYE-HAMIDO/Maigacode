@@ -71,9 +71,10 @@ class SuperCodeurModel(nn.Module):
     ):
         """Forward pass.
 
-        If ``targets`` is given, returns ``(logits, loss)`` with the loss
-        already computed on the next-token objective (no manual shifting
-        needed by the caller). Otherwise returns ``(logits, present_kv)``.
+        If ``targets`` is given, returns ``(None, loss)``: the loss is computed
+        on the next-token objective in memory-bounded chunks and the full logit
+        tensor is never materialized (the trainer only needs the loss).
+        Otherwise returns ``(logits, present_kv)`` for generation/inference.
         """
         batch, seq_len = input_ids.shape
 
