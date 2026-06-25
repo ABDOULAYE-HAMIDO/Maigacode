@@ -117,12 +117,17 @@ class SuperCodeurModel(nn.Module):
 
         if targets is not None:
             # Next-token objective: predict token t+1 from the state at t.
-            # Computed in row-chunks so the full [B*T, vocab] logit tensor
-            # (>1 GB at vocab=32k) is never materialized at once. No logits
-            # are returned during training (the trainer only needs the loss).
-            hidden = h[:, :-1, :].reshape(-1, h.size(-1))
-            labels = targets[:, 1:].reshape(-1)
-            loss = self._chunked_loss(hidden, labels, ignore_index)
+            # Full logits matrix at batch=4, seq=1024, vocab=5000 is ~20 MB
+            # in fp16 — well within T4 memory. Direct computation is ~10×
+            # faster than chunked + checkpointed loss.
+            logits = self.lm_head(h)
+            shift_logits = logits[:, :-1, :].reshape(-1, logits.size(-1))
+            shift_targets = targets[:, 1:].reshape(-1)
+            loss = F.cross_entropy(
+                shift_logits.float(),
+                shift_targets,
+                ignore_index=ignore_index,
+            )
             return None, loss
 
         logits = self.lm_head(h)
